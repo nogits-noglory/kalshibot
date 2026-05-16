@@ -444,7 +444,7 @@ import sqlite3 as _sqlite3
 from pathlib import Path as _Path
 from datetime import datetime as _dt
 
-_BOT_DIR_DEFAULT = _Path(os.environ.get("KALSHI_BOT_DIR", r"C:\Users\kern\Projects\KalshiBot"))
+_BOT_DIR_DEFAULT = _Path(os.environ.get("KALSHI_BOT_DIR", str(_Path(__file__).parent)))
 _DB_PATH = _BOT_DIR_DEFAULT / "kalshi_bot.db"
 _AGENT_LOG = _BOT_DIR_DEFAULT / "kalshi_agent.log"
 _WATCHDOG_LOG = _BOT_DIR_DEFAULT / "kalshi_watchdog.log"
