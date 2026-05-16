@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""
-Kalshi MCP Server — Gives Claude direct trading agency on Kalshi.
-"""
+"""Kalshi MCP server — exposes trading tools to Claude."""
 
 import os
 import sys
@@ -436,10 +434,7 @@ def get_exchange_status() -> str:
         return f"Error: {e}"
 
 
-# ═══════════════════════════════════════════════════════════════
-# BOT INTROSPECTION TOOLS
-# Lets the AI see what the autonomous bot has been doing.
-# ═══════════════════════════════════════════════════════════════
+# bot introspection tools
 import sqlite3 as _sqlite3
 from pathlib import Path as _Path
 from datetime import datetime as _dt
@@ -644,7 +639,6 @@ def main():
         sys.exit(1)
     _load_private_key()
     print(f"✅ Kalshi MCP server ready (key: {KALSHI_API_KEY[:8]}...)", file=sys.stderr)
-    # Keepalive thread — prevents idle disconnection
     def _keepalive():
         while True:
             time.sleep(60)

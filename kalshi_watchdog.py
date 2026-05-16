@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Kalshi Watchdog — Hybrid position monitor.
-Runs every 30 minutes via Task Scheduler. Free until something triggers.
-
-Logic:
-  1. Poll all open positions (no AI, no cost)
-  2. If a position approaches stop-loss OR profit target threshold:
-       → Call Claude with current market context
-       → Claude decides: exit now, hold, or watch
-  3. Execute Claude's decision
-  4. Send Windows toast notification on any action
-
-Cost: ~$0.02-0.05 only when a position moves significantly. Otherwise free.
+Kalshi watchdog — polls open positions every 30 min, calls Claude only when
+something triggers a stop-loss or profit-target alert.
 
 Usage:
     python kalshi_watchdog.py
@@ -43,9 +33,6 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
 
-# ===============================================================
-# CONFIGURATION
-# ===============================================================
 BOT_DIR = Path(os.environ.get("KALSHI_BOT_DIR", str(Path(__file__).parent)))
 
 KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY", "")
@@ -55,18 +42,13 @@ KALSHI_PRIVATE_KEY_PATH = os.environ.get(
 )
 KALSHI_BASE_URL   = "https://api.elections.kalshi.com/trade-api/v2"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-
-# --- ntfy.sh notification topic -------------------------------
-NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
-NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
-
-# --- GitHub Gist status (for remote health checks) ------------
-GIST_TOKEN = os.environ.get("GITHUB_GIST_TOKEN", "")
-GIST_ID    = os.environ.get("GITHUB_GIST_ID", "")
+NTFY_TOPIC        = os.environ.get("NTFY_TOPIC", "")
+NTFY_URL          = f"https://ntfy.sh/{NTFY_TOPIC}"
+GIST_TOKEN        = os.environ.get("GITHUB_GIST_TOKEN", "")
+GIST_ID           = os.environ.get("GITHUB_GIST_ID", "")
 
 
 def update_gist(content: str):
-    """Overwrite status.txt in the configured gist. Best-effort."""
     if not (GIST_TOKEN and GIST_ID):
         return
     try:
@@ -84,7 +66,6 @@ def update_gist(content: str):
 
 
 def ntfy(title: str, message: str, priority: str = "default", tags: str = ""):
-    """Post a status update to ntfy.sh. Best-effort, never blocks."""
     if not NTFY_TOPIC:
         return
     try:
@@ -95,18 +76,14 @@ def ntfy(title: str, message: str, priority: str = "default", tags: str = ""):
     except Exception:
         pass
 
-# --- Trigger Thresholds ---------------------------------------
-ALERT_STOP_LOSS_PCT  = 0.55   # Wake Claude if position drops to 55% of cost
-ALERT_PROFIT_PCT     = 0.75   # Wake Claude if position reaches 75% of max payout
-HARD_STOP_LOSS_PCT   = 0.35   # Emergency exit WITHOUT Claude if drops to 35%
-MIN_DAYS_TO_HOLD     = 0.25   # Don't exit within 6h of resolution — let it ride
+ALERT_STOP_LOSS_PCT = 0.55
+ALERT_PROFIT_PCT    = 0.75
+HARD_STOP_LOSS_PCT  = 0.35
+MIN_DAYS_TO_HOLD    = 0.25  # don't exit within 6h of resolution
 
 LOG_PATH = BOT_DIR / "kalshi_watchdog.log"
 DB_PATH  = BOT_DIR / "kalshi_bot.db"
 
-# ===============================================================
-# LOGGING
-# ===============================================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [WATCHDOG] %(message)s",
@@ -117,15 +94,12 @@ logging.basicConfig(
 )
 log = logging.getLogger("watchdog")
 
-# Force stdout to UTF-8 on Windows to handle box-drawing characters
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
     pass
 
-# ===============================================================
-# KALSHI API
-# ===============================================================
+
 _private_key = None
 
 
@@ -176,10 +150,8 @@ def get_positions():
     raw = data.get("market_positions") or data.get("positions", [])
     result = []
     for p in raw:
-        # New API: position_fp is a single signed value
-        # Positive = YES contracts, negative = NO contracts
+        # signed: positive = YES contracts, negative = NO contracts
         position_fp = float(p.get("position_fp") or 0)
-        # Fall back to old fields if present
         legacy_yes = float(p.get("yes_count_fp") or p.get("yes_count") or 0)
         legacy_no  = float(p.get("no_count_fp")  or p.get("no_count")  or 0)
 
@@ -192,14 +164,9 @@ def get_positions():
 
         if yes == 0 and no == 0:
             continue
-        # Use total_traded_dollars as our cost basis when DB record is missing.
-        # For active (unclosed) positions, this equals what we paid in.
         entry_cost_api = float(p.get("total_traded_dollars") or 0)
-        # If realized_pnl is non-zero, we've sold some — adjust to get current cost basis
-        realized_pnl = float(p.get("realized_pnl_dollars") or 0)
-        # market_exposure_dollars is the current cost basis on still-held shares
-        cost_basis = float(p.get("market_exposure_dollars") or 0) or entry_cost_api
-        # Compute average entry yes_price per contract
+        realized_pnl   = float(p.get("realized_pnl_dollars") or 0)
+        cost_basis     = float(p.get("market_exposure_dollars") or 0) or entry_cost_api
         count = yes if yes > 0 else no
         avg_entry_yes = None
         if count > 0 and cost_basis > 0:
@@ -258,9 +225,6 @@ def place_sell(ticker, side, count, yes_price, dry_run=False):
         return False
 
 
-# ===============================================================
-# DATABASE
-# ===============================================================
 def get_open_trades():
     if not DB_PATH.exists():
         return []
@@ -310,7 +274,6 @@ HOLD_COOLDOWN_HOURS = 4  # Don't re-ask Claude after "hold" for this many hours
 
 
 def get_last_decision(ticker: str):
-    """Return the most recent watchdog decision for a ticker, or None."""
     if not DB_PATH.exists():
         return None
     try:
@@ -326,14 +289,13 @@ def get_last_decision(ticker: str):
 
 
 def is_on_cooldown(ticker: str) -> bool:
-    """Return True if we should skip Claude for this ticker this cycle."""
     last = get_last_decision(ticker)
     if not last:
         return False
     if last["decision"] == "watch":
-        return False  # Always re-evaluate watch
+        return False
     if last["decision"] == "exit":
-        return True   # Already decided, order should be resting
+        return True
     if last["decision"] == "hold":
         try:
             decided = datetime.fromisoformat(last["decided_at"].replace("Z", "+00:00"))
@@ -342,9 +304,9 @@ def is_on_cooldown(ticker: str) -> bool:
         except Exception:
             return False
     return False
-# ===============================================================
+
+
 def notify(title, message):
-    # Push to ntfy.sh (remote visibility)
     ntfy(title, message, priority="high", tags="warning")
     # Also fire local Windows toast
     try:
@@ -361,9 +323,6 @@ def notify(title, message):
         pass
 
 
-# ===============================================================
-# HELPERS
-# ===============================================================
 def days_until(iso_str):
     if not iso_str:
         return 999
@@ -399,9 +358,6 @@ def compute_metrics(trade, market):
     }
 
 
-# ===============================================================
-# CLAUDE DECISION ENGINE
-# ===============================================================
 WATCHDOG_SYSTEM_PROMPT = """You are a Kalshi prediction market risk manager.
 A position has triggered a watchdog alert. Decide whether to exit or hold.
 
@@ -423,7 +379,6 @@ Respond ONLY with a JSON object, nothing else:
 
 
 def ask_claude(position_context: dict, trigger: str) -> dict:
-    """Ask Claude whether to exit or hold a triggered position."""
     if not ANTHROPIC_API_KEY:
         log.warning("No ANTHROPIC_API_KEY — defaulting to hold")
         return {"decision": "hold", "reasoning": "No API key", "exit_yes_price": None}
@@ -489,9 +444,6 @@ Search for relevant current data if needed, then decide: exit or hold?"""
         return {"decision": "hold", "reasoning": f"API error: {e}", "exit_yes_price": None}
 
 
-# ===============================================================
-# MAIN
-# ===============================================================
 def run(dry_run=False):
     log.info("-" * 55)
     log.info(f"Watchdog {'(DRY RUN) ' if dry_run else ''}— {datetime.now().strftime('%H:%M:%S')}")
@@ -510,7 +462,6 @@ def run(dry_run=False):
         log.error(f"Failed to fetch positions: {e}")
         return
 
-    # Fetch resting orders so we don't place duplicate exits
     try:
         orders_data = _api("GET", "/portfolio/orders", params={"status": "resting"})
         resting_orders = orders_data.get("orders", [])
@@ -575,7 +526,6 @@ def run(dry_run=False):
         if market.get("status") != "active":
             continue
 
-        # Override side/count from DB (more reliable)
         trade = {**trade, "side": side, "count": count}
         metrics = compute_metrics(trade, market)
         dtc     = metrics["days_to_close"]
@@ -587,12 +537,10 @@ def run(dry_run=False):
             f"{dtc:.2f}d"
         )
 
-        # Within 6h of close — let it ride regardless
         if dtc < MIN_DAYS_TO_HOLD:
             log.info(f"    → <{MIN_DAYS_TO_HOLD*24:.0f}h to close, letting ride")
             continue
 
-        # -- Hard stop — no Claude ------------------------------
         if metrics["pct_of_cost"] < HARD_STOP_LOSS_PCT:
             if ticker in tickers_with_exit:
                 log.info(f"    Hard stop triggered but exit already resting for {ticker}, skipping")
@@ -609,7 +557,6 @@ def run(dry_run=False):
                 actions += 1
             continue
 
-        # -- Soft triggers — consult Claude --------------------
         trigger = None
         if metrics["pct_of_cost"] < ALERT_STOP_LOSS_PCT:
             trigger = f"STOP-LOSS ALERT: at {metrics['pct_of_cost']:.0%} of cost (threshold {ALERT_STOP_LOSS_PCT:.0%})"
@@ -617,14 +564,12 @@ def run(dry_run=False):
             trigger = f"PROFIT TARGET: at {metrics['pct_of_max']:.0%} of max payout (threshold {ALERT_PROFIT_PCT:.0%})"
 
         if not trigger:
-            continue  # Position healthy, no action needed
+            continue
 
-        # Skip if a resting exit order already exists for this ticker
         if ticker in tickers_with_exit:
             log.info(f"    Resting exit order already exists for {ticker}, skipping Claude")
             continue
 
-        # Skip if Claude already decided recently (cooldown)
         if is_on_cooldown(ticker):
             last = get_last_decision(ticker)
             log.info(f"    {ticker} on cooldown (last: {last['decision']} at {last['decided_at'][:16]})")
@@ -650,12 +595,11 @@ def run(dry_run=False):
 
         elif decision["decision"] == "watch":
             notify("KalshiBot Watch", f"{ticker}: {decision['reasoning'][:80]}")
-        # "hold" — do nothing
+        # hold — do nothing
 
     log.info(f"Done. Actions taken: {actions}")
     log.info("-" * 55)
 
-    # -- Heartbeat — post to ntfy AND update gist for health check --
     try:
         ts_now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         positions_lines = []
